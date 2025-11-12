@@ -111,7 +111,10 @@ def login():
             return redirect(url_for("dashboard"))
         flash("Неверный логин или пароль", "error")
 
-    return render_template_string(TPL_LOGIN, title="Вход", TPL_BASE=TPL_BASE)
+    # Вместо extends вставляем шаблон целиком:
+    html = TPL_BASE.replace("{% block content %}{% endblock %}", TPL_LOGIN)
+    return render_template_string(html, title="Вход")
+
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -248,3 +251,4 @@ TPL_DASH = """
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
