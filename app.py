@@ -16,14 +16,18 @@ from werkzeug.utils import secure_filename
 APP_ROOT = Path(__file__).parent.resolve()
 DB_PATH = APP_ROOT / "app.db"
 UPLOAD_ROOT = APP_ROOT / "uploads"
-UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+UPLOAD_ROOT.mkdir(exist_ok=True)
+
+MAX_CONTENT_LENGTH = 1024 * 1024 * 100  # 100 MB
+ALLOWED_OVERWRITE = True
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
-app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 100  # 100 MB
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+
 
 # ---------------------
-# База данных SQLite
+# База данных
 # ---------------------
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,8 +48,9 @@ def init_db():
 
 init_db()
 
+
 # ---------------------
-# Хелперы аутентификации
+# Авторизация
 # ---------------------
 def login_required(fn):
     @wraps(fn)
@@ -76,17 +81,107 @@ def safe_join_user_path(base: Path, rel: str) -> Path:
 def list_dir(path: Path):
     files, dirs = [], []
     for entry in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+        stat = entry.stat()
         info = {
             "name": entry.name,
             "is_file": entry.is_file(),
-            "size": entry.stat().st_size,
-            "mtime": datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "size": stat.st_size,
+            "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
         }
         (files if entry.is_file() else dirs).append(info)
     return dirs, files
 
+
 # ---------------------
-# Шаблоны
+# Роуты
+# ---------------------
+@app.route("/", methods=["GET"])
+def index():
+    return redirect(url_for("login") if "user_id" not in session else url_for("dashboard"))
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        with db() as conn:
+            user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
+            session["user_id"] = user["id"]
+            return redirect(url_for("dashboard"))
+        flash("Неверный логин или пароль", "error")
+
+    return render_template_string(TPL_LOGIN, title="Вход", TPL_BASE=TPL_BASE)
+
+@app.route("/register", methods=["POST"])
+def register():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    if not username or not password:
+        flash("Укажите логин и пароль", "error")
+        return redirect(url_for("login"))
+    with db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, generate_password_hash(password), datetime.utcnow().isoformat())
+            )
+            user_id = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()["id"]
+        except sqlite3.IntegrityError:
+            flash("Логин уже занят", "error")
+            return redirect(url_for("login"))
+    user_root(user_id)
+    flash("Успешная регистрация. Войдите.", "ok")
+    return redirect(url_for("login"))
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+@app.route("/dashboard", methods=["GET"])
+@login_required
+def dashboard():
+    user = current_user()
+    root = user_root(user["id"])
+    rel = request.args.get("path", "").strip()
+    try:
+        cur_dir = safe_join_user_path(root, rel)
+    except ValueError:
+        flash("Недопустимый путь", "error")
+        return redirect(url_for("dashboard"))
+
+    rel_norm = os.path.relpath(cur_dir, root)
+    rel_norm = "" if rel_norm == "." else rel_norm
+
+    dirs, files = list_dir(cur_dir)
+    breadcrumbs = make_breadcrumbs(rel_norm)
+
+    return render_template_string(
+        TPL_DASH,
+        title="Мой кабинет",
+        username=user["username"],
+        cur_rel=rel_norm,
+        breadcrumbs=breadcrumbs,
+        dirs=dirs,
+        files=files,
+        TPL_BASE=TPL_BASE
+    )
+
+def make_breadcrumbs(rel_path: str):
+    crumbs = [{"name": "root", "href": url_for("dashboard")}]
+    if not rel_path:
+        return crumbs
+    parts, acc = rel_path.split("/"), []
+    for part in parts:
+        acc.append(part)
+        href = url_for("dashboard") + f"?path={'/'.join(acc)}"
+        crumbs.append({"name": part, "href": href})
+    return crumbs
+
+
+# ---------------------
+# Шаблоны (inline)
 # ---------------------
 TPL_BASE = """
 <!doctype html>
@@ -96,17 +191,14 @@ TPL_BASE = """
   <title>{{ title or "Хранилище файлов" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root { --bg:#0e0f12; --card:#16181d; --text:#e6e6e6; --muted:#9aa0aa; --accent:#6aa3ff; --danger:#ff6a6a; --ok:#53d769; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background: var(--bg); color: var(--text); margin:0; padding:40px; }
-    .card { background: var(--card); border-radius: 14px; padding: 24px; max-width: 900px; margin:auto; box-shadow:0 10px 25px rgba(0,0,0,.4); }
-    .btn { background: var(--accent); color:white; border:none; padding:10px 18px; border-radius:8px; cursor:pointer; }
-    .btn.danger { background: var(--danger); }
-    .btn.ok { background: var(--ok); color:#000; }
-    .input { width:100%; padding:10px; margin:8px 0; border-radius:6px; border:1px solid #333; background:#0f1116; color:#fff; }
-    .muted { color:var(--muted); }
-    table { width:100%; border-collapse:collapse; margin-top:10px; }
-    th,td { padding:10px; border-bottom:1px solid #333; }
-    .right { text-align:right; }
+    body { font-family: system-ui, sans-serif; background:#0e0f12; color:#e6e6e6; margin:0; padding:40px; }
+    .card { background:#16181d; border-radius:10px; padding:20px; max-width:960px; margin:auto; box-shadow:0 10px 25px rgba(0,0,0,.4); }
+    input, button { padding:10px; margin:5px; border-radius:6px; border:none; }
+    input { width:250px; background:#0f1116; color:white; border:1px solid #333; }
+    button { background:#1a64ff; color:white; cursor:pointer; }
+    .btn.ok { background:#53d769; color:#000; }
+    .flash.error { color:#ff6a6a; }
+    .flash.ok { color:#53d769; }
   </style>
 </head>
 <body>
@@ -122,142 +214,36 @@ TPL_BASE = """
 </html>
 """
 
-TPL_LOGIN = """{% extends TPL_BASE %}{% block content %}
-<h1>Файловое хранилище</h1>
-<p class="muted">Войдите или зарегистрируйтесь</p>
+TPL_LOGIN = """
+{% extends TPL_BASE %}
+{% block content %}
+<h2>Вход в систему</h2>
 <form method="post">
-  <input class="input" name="username" placeholder="Логин" required>
-  <input class="input" type="password" name="password" placeholder="Пароль" required>
-  <button class="btn" type="submit">Войти</button>
+  <input name="username" placeholder="Логин" required><br>
+  <input type="password" name="password" placeholder="Пароль" required><br>
+  <button type="submit">Войти</button>
 </form>
+<hr>
+<h3>Регистрация</h3>
 <form method="post" action="{{ url_for('register') }}">
-  <input class="input" name="username" placeholder="Новый логин" required>
-  <input class="input" type="password" name="password" placeholder="Пароль" required>
+  <input name="username" placeholder="Логин" required><br>
+  <input type="password" name="password" placeholder="Пароль" required><br>
   <button class="btn ok" type="submit">Создать аккаунт</button>
 </form>
 {% endblock %}
 """
 
-TPL_DASH = """{% extends TPL_BASE %}{% block content %}
-<h1>Кабинет {{ username }}</h1>
-<form method="post" action="{{ url_for('logout') }}">
-  <button class="btn danger" type="submit">Выйти</button>
-</form>
-<hr>
-<form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-  <input type="hidden" name="path" value="{{ cur_rel }}">
-  <input class="input" type="file" name="file">
-  <button class="btn ok" type="submit">Загрузить</button>
-</form>
-<h3>Файлы</h3>
-<table>
-  <thead><tr><th>Имя</th><th>Размер</th><th>Изменён</th><th class="right">Действия</th></tr></thead>
-  <tbody>
-  {% for f in files %}
-  <tr>
-    <td>{{ f.name }}</td><td>{{ f.size }} B</td><td>{{ f.mtime }}</td>
-    <td class="right">
-      <a class="btn" href="{{ url_for('download') }}?path={{ cur_rel }}&name={{ f.name }}">Скачать</a>
-      <form method="post" action="{{ url_for('delete') }}" style="display:inline;">
-        <input type="hidden" name="path" value="{{ cur_rel }}">
-        <input type="hidden" name="name" value="{{ f.name }}">
-        <button class="btn danger" type="submit">Удалить</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+TPL_DASH = """
+{% extends TPL_BASE %}
+{% block content %}
+<h2>Кабинет — {{ username }}</h2>
+<p>Добро пожаловать! Здесь вы можете загружать и управлять своими файлами.</p>
 {% endblock %}
 """
 
-# ---------------------
-# Маршруты
-# ---------------------
-@app.route("/", methods=["GET"])
-def index():
-    return redirect(url_for("login") if "user_id" not in session else url_for("dashboard"))
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        username, password = request.form["username"], request.form["password"]
-        with db() as conn:
-            user = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
-            session["user_id"] = user["id"]
-            return redirect(url_for("dashboard"))
-        flash("Неверный логин или пароль", "error")
-    return render_template_string(TPL_LOGIN, TPL_BASE=TPL_BASE, title="Вход")
-
-@app.route("/register", methods=["POST"])
-def register():
-    username, password = request.form["username"], request.form["password"]
-    if not username or not password:
-        flash("Введите логин и пароль", "error")
-        return redirect(url_for("login"))
-    with db() as conn:
-        try:
-            conn.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                         (username, generate_password_hash(password), datetime.utcnow().isoformat()))
-            user_id = conn.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()["id"]
-            user_root(user_id)
-            flash("Регистрация успешна, войдите!", "ok")
-        except sqlite3.IntegrityError:
-            flash("Такой логин уже существует", "error")
-    return redirect(url_for("login"))
-
-@app.route("/logout", methods=["POST"])
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    user = current_user()
-    root = user_root(user["id"])
-    dirs, files = list_dir(root)
-    return render_template_string(TPL_DASH, TPL_BASE=TPL_BASE,
-                                  title="Кабинет", username=user["username"],
-                                  dirs=dirs, files=files, cur_rel="")
-
-@app.route("/upload", methods=["POST"])
-@login_required
-def upload():
-    user = current_user()
-    root = user_root(user["id"])
-    f = request.files.get("file")
-    if not f:
-        flash("Файл не выбран", "error")
-        return redirect(url_for("dashboard"))
-    filename = secure_filename(f.filename)
-    f.save(root / filename)
-    flash("Файл загружен", "ok")
-    return redirect(url_for("dashboard"))
-
-@app.route("/delete", methods=["POST"])
-@login_required
-def delete():
-    user = current_user()
-    root = user_root(user["id"])
-    name = request.form["name"]
-    target = root / name
-    if target.exists():
-        target.unlink()
-        flash("Удалено", "ok")
-    return redirect(url_for("dashboard"))
-
-@app.route("/download")
-@login_required
-def download():
-    user = current_user()
-    root = user_root(user["id"])
-    name = request.args.get("name")
-    return send_from_directory(root, name, as_attachment=True)
 
 # ---------------------
-# Запуск
+# Точка входа
 # ---------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
