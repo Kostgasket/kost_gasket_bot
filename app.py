@@ -487,13 +487,60 @@ TPL_DASH = """
 {% endblock %}
 """
 
-# даём шаблонам доступ к базе
-app.jinja_env.globals["TPL_BASE"] = TPL_BASE
+from flask import Flask, render_template_string, request, redirect, url_for, flash
+import os
+
+app = Flask(__name__)
+app.secret_key = "123"
+
+# --- Базовый шаблон ---
+TPL_BASE = """<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title or "Хранилище файлов" }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: sans-serif; background: #0e0f12; color: #e6e6e6; text-align: center; margin-top: 60px; }
+    .card { display:inline-block; background:#16181d; padding:30px; border-radius:10px; box-shadow:0 0 10px rgba(0,0,0,.3); }
+    input { margin:8px 0; padding:10px; border-radius:6px; border:1px solid #444; background:#111; color:#fff; }
+    button { padding:10px 20px; background:#1a64ff; border:none; border-radius:6px; color:#fff; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>"""
+
+# --- Страница логина ---
+TPL_LOGIN = """{% extends TPL_BASE %}{% block content %}
+  <h1>Вход</h1>
+  <form method="post">
+    <input name="username" placeholder="Логин"><br>
+    <input name="password" type="password" placeholder="Пароль"><br>
+    <button type="submit">Войти</button>
+  </form>
+{% endblock %}"""
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if request.form["username"] == "admin" and request.form["password"] == "1234":
+            flash("Вход выполнен!", "ok")
+            return redirect(url_for("index"))
+        else:
+            flash("Неверные данные", "error")
+    return render_template_string(TPL_LOGIN, title="Вход", TPL_BASE=TPL_BASE)
+
+@app.route("/")
+def index():
+    return "<h2>Главная страница</h2>"
 
 if __name__ == "__main__":
-    import os
-port = int(os.environ.get("PORT", 5000))
-app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 
 
